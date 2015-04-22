@@ -7,4 +7,4 @@ In this exercise we use the data Reuters-21578 which is a popular data could be 
 3. Then we applied 3 clustering methods to cluster the data. These methods are Kmeans, PAM and Hierachical. 
 
 
-All the analysis are uploaded to the tabula.
+All the analysis are uploaded to the tabula. And the R code is in the file CS909 WEEK 10.
