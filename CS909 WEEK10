@@ -1,0 +1,447 @@
+##  Question 1
+
+##  Read the data into R
+library(NLP)
+library(tm)
+library(e1071)
+library(randomForest)
+library(topicmodels)
+library(SnowballC)
+library(fpc)
+library(cluster)
+library(class)
+data <- read.csv(file="Desktop/reutersCSV.csv")
+
+
+
+##  Getting the text data from the reutersCSV
+text <- data[,140]
+
+                      ####  PRE-PROCESSING  ####
+##  Create the Corpus
+cor_text <- Corpus(VectorSource(text))
+
+##  For Analysis the text data we need to clean the corpus.
+##  Function for cleaning the Corpus
+Cleancor_text <- function(a) {
+  ## Remove Stopwords
+  ncor_text <- tm_map(a, removeWords, stopwords("english"))
+  ## Remove Punctuations
+  ncor_text <- tm_map(ncor_text, removePunctuation)
+  ## Convert to Lower Case
+  ncor_text <- tm_map(ncor_text, content_transformer(tolower))
+  ## Stemming
+  ncor_text <- tm_map(ncor_text, stemDocument, language = "english")
+  ## Remove Numbers
+  ncor_text <- tm_map(ncor_text, removeNumbers)
+  ## Eliminating Extra White Spaces
+  ncor_text <- tm_map(ncor_text, stripWhitespace)
+  return(ncor_text)
+}
+
+## Clean the corpus
+ncor_text <- Cleancor_text(cor_text)
+
+## Create Term Document Matrices(Rows: Terms, Columns: Docs' numbers)
+tdm <- TermDocumentMatrix(ncor_text)
+ntdm <- removeSparseTerms(tdm,0.8)# 11 words
+
+## frequency analysis
+findFreqTerms(ntdm, 100)
+# Here the most common 5 terms are the same with the rest of terms when
+# we remove the Sparse Terms.
+
+
+## Make the Term Document Matrices easy to analysis
+mtdm <- as.data.frame(t(data.matrix(ntdm)), stringAsFactors=F)
+
+## Calculating the TFIDF
+tfidf=function(mtdm){
+  tf <- mtdm
+  id=function(col){sum(!col==0)}
+  idf <- log(nrow(mtdm)/apply(mtdm, 2, id))
+  tfidf <- mtdm
+  for(word in names(idf)){tfidf[,word] <- tf[,word] * idf[word]}
+  return(tfidf)
+}
+
+TFIDF <- tfidf(mtdm)
+
+## Find the 10 most populous topic
+colsum <- colSums(data[,c(-1,-2,-3,-140,-139)])
+names <- names(sort(colsum,decreasing=T)[1:10])
+pop_data <- data[,c(names)]
+
+## Give each document a relevant topic
+rowSums(pop_data)
+# From the rowsum we find that there are four values 0,1,2 and 3
+# 0 means this document has no perticular relevant to the most 10
+# popular topic. 1 means the document is relevant to a specific 
+# topic.....
+ntopic <- c()
+for(i in 1:nrow(pop_data)){
+  if(sum(pop_data[i,])==0){
+    ntopic[i] <- NA
+  }
+  if(sum(pop_data[i,])==1){
+    ntopic[i] <- names(pop_data[which(pop_data[i,]==1)])
+  }
+  if(sum(pop_data[i,])>1)
+    ntopic[i] <- sample(names(pop_data[which(pop_data[i,]==1)]),1)
+}
+as.factor(ntopic)
+
+## Then bind the topic with the pop_data.
+npop_data <- cbind(TFIDF, ntopic)
+npop_mtdm <- cbind(mtdm, ntopic)
+
+## Delete the document data which has the NA topic
+final_data <- npop_data[-which(is.na(ntopic)), ]
+final_mtdm <- npop_mtdm[-which(is.na(ntopic)), ]
+
+## Delete the rows which sum to 0.
+nfinal_data <- final_data[apply(final_data[,-12], 1, FUN=function(x) !sum(x)==0),] 
+nfinal_mtdm <- final_mtdm[apply(final_mtdm[,-12], 1, FUN=function(x) !sum(x)==0),] 
+
+# Now we have two dataset with words features and the topic.
+# 1: nfinal_data: The data set with TFIDF and topic which is a feature representation
+# of the document by using bag of words approch.
+# 2: nfinal_mtdm: The data set with word's counts and topic
+
+## Another features come from the topic models. And we use LDA to get these features.
+## Select the best K in LDA. 
+burnin = 1000
+iter = 1000
+keep = 50
+harmonicMean <- function(logLikelihoods, precision=2000L) {
+  library("Rmpfr")
+  llMed <- median(logLikelihoods)
+  as.double(llMed - log(mean(exp(-mpfr(logLikelihoods,
+                                       prec = precision) + llMed))))
+}
+
+## generate numerous topic models with different numbers of topics
+sequ <- seq(2, 20, 1) # in this case a sequence of numbers from 1 to 50, by ones.
+fitted_many <- lapply(sequ, function(k) LDA(nfinal_mtdm[,-12], k = k, method = "Gibbs",
+                                            control = list(burnin = burnin, iter = iter, keep = keep) ))
+
+## extract logliks from each topic
+logLiks_many <- lapply(fitted_many, function(L)  L@logLiks[-c(1:(burnin/keep))])
+
+## compute harmonic means
+hm_many <- sapply(logLiks_many, function(h) harmonicMean(h))
+
+## inspect
+plot(sequ, hm_many, type = "l", main="Figure 1: Harmonic mean against topic numbers",
+     ylab="Harmonic mean", xlab="topics")
+
+## compute optimum number of topics
+sequ[which.max(hm_many)]
+
+## seems 18 will be the best 
+
+## Then we use K=18 in the LDA
+lda <- LDA(x=nfinal_mtdm[,-12],k=18,method = "Gibbs",
+           control = list(burnin = burnin, iter = iter, keep = keep)) 
+
+lda_data <- cbind(as.data.frame(lda@gamma), nfinal_mtdm[,12])
+colnames(lda_data)[19] <- "topic"
+
+### make the obersavation's number could be divided by 10 with no remainder
+
+### Bag of Words
+##  Here we need to standardized the data
+bow_dataa <- round(nfinal_data[1:8640,-12]/rowSums(nfinal_data[1:8640,-12]),4)
+bow_data <- cbind(bow_dataa, nfinal_data[1:8640,][12])
+colnames(bow_data)[12] <- "topic"
+"bow_data" <- bow_data
+
+
+### LDA 
+lda_data <- lda_data[1:8640,]
+"lda_data" <- lda_data
+
+### Bag of Words+LDA
+lda_bow_data <- cbind(bow_data[,-12], lda_data[,-19], bow_data[,12])
+colnames(lda_bow_data)[30] <- "topic"
+lda_bow_data <- lda_bow_data[1:8640,]
+
+"lda_bow_data" <- lda_bow_data
+
+
+### Question 3
+### PREDICTION ###
+## Here we use the 10-fold cross validation to make our prediction more 
+## accurate, and the algorithm we used here are SVM, RandomForest, Naive Bayes
+## and KNN.
+
+####  To do the K-fold cross validation for SVM, RandomForest, Naive Bayes and KNN
+####  we create a function.
+####  Input:
+####             dataset=The dataset we used 
+####             K=how many fold we need
+####             method=the algoritm we use
+####             name=the name of the dataset we used(for better use of SVM)
+####  Output:     
+####             Average_error_rate: The estimated average error rate
+####             table: 10 fold confusion tables
+
+####  Create the funciton 
+
+#### Find the best cost and gamma for SVM based on bag of words
+tuned1<-tune.svm(topic~., data = bow_data, gamma = 10^(-6:-1), cost = 10^(-1:1))
+tuned1
+## The best parameters are gamma=0.1 and cost=10
+
+#### Find the best cost and gamma for SVM based on topic model 
+tuned2<-tune.svm(topic~., data = lda_data, gamma = 10^(-6:-1), cost = 10^(-1:1))
+tuned2
+## The best parameters are gamma=0.1 and cost=1
+
+#### Find the best cost and gamma for SVM based on bag of words+topic model
+tuned3<-tune.svm(topic~., data = lda_bow_data, gamma = 10^(-6:-1), cost = 10^(-1:1))
+tuned3
+
+## The best parameter are gamma=0.01 and cost=10
+CV<-function(dataset, K, method, name){
+  ####  Randomly break the dataset into K partitions
+  set.seed(1)
+  newdata<-dataset[sample(nrow(dataset)),]
+  testset<-split(newdata, sample(rep(1:K)))
+  trainset<-list()
+  model<-list()
+  prediction<-list()
+  table<-list()
+  error_rates<-c()
+  gamma<-c()
+  cost<-c()
+  if(name=="bow_data"){
+    gamma[1] <- 0.1
+    cost[1] <- 10
+  }
+  if(name=="lda_data"){
+    gamma[1] <- 0.1
+    cost[1] <- 1
+  }
+  if(name=="lda_bow_data"){
+    gamma[1] <- 0.01
+    cost[1] <- 10
+  }
+  if(method=="SVM"){
+    for(i in 1:K){
+      trainset[[i]]<-as.data.frame(do.call("rbind", testset[-i]))
+      model[[i]]<-svm(topic~., data = trainset[[i]], kernel="radial", gamma=gamma[1], cost=cost[1])
+      prediction[[i]]<-predict(model[[i]], testset[[i]][,-ncol(dataset)])
+      table[[i]]<-table(pred = prediction[[i]], true = testset[[i]][,ncol(dataset)])
+      error_rates[i]<-sum(diag(table[[i]]))/sum(table[[i]])
+    }
+  }
+  if(method=="RF"){
+    for(i in 1:K){
+      trainset[[i]]<-as.data.frame(do.call("rbind", testset[-i]))
+      model[[i]]<-randomForest(topic~., data=trainset[[i]])
+      prediction[[i]]<-predict(model[[i]], testset[[i]][,-ncol(dataset)])
+      table[[i]]<-table(pred = prediction[[i]], true = testset[[i]][,ncol(dataset)])
+      error_rates[i]<-sum(diag(table[[i]]))/sum(table[[i]])
+    }
+  }
+  if(method=="NB"){
+    for(i in 1:K){
+      trainset[[i]]<-as.data.frame(do.call("rbind", testset[-i]))
+      model[[i]]<-naiveBayes(trainset[[i]][,1:(ncol(dataset)-1)], trainset[[i]][,ncol(dataset)])
+      prediction[[i]]<-predict(model[[i]], testset[[i]][,-ncol(dataset)])
+      table[[i]]<-table(pred = prediction[[i]], true = testset[[i]][,ncol(dataset)])
+      error_rates[i]<-sum(diag(table[[i]]))/sum(table[[i]])
+    }
+  }
+  if(method=="KNN"){
+    for(i in 1:K){
+        trainset[[i]]<-as.data.frame(do.call("rbind", testset[-i]))
+        model[[i]]<-knn(trainset[[i]][,-ncol(dataset)], testset[[i]][,-ncol(dataset)],
+                        cl=trainset[[i]][,ncol(dataset)],k=10)
+        table[[i]]<-table(pred=model[[i]], true=testset[[i]][,ncol(dataset)])
+        error_rates[i]<-sum(diag(table[[i]]))/sum(table[[i]])
+      }
+    }
+  
+  ASVM<-c()
+
+  for(i in 1:K){
+    ASVM[i]<-sum(diag(table[[i]]))/sum(table[[i]])
+  }
+  return(list(Average_accuracy_rate=mean(error_rates), Accuracy_rate=ASVM,Confusion_matrix=table))
+}
+
+## Get the prediction result for Bag of Words data
+RF_bow <- CV(bow_data,10,"RF", "bow_data")
+CRF_bow <- RF_bow$Confusion_matrix
+NB_bow <- CV(bow_data,10,"NB", "bow_data")
+CNB_bow <- NB_bow$Confusion_matrix
+SVM_bow <- CV(bow_data,10,"SVM", "bow_data")
+CSVM_bow <- SVM_bow$Confusion_matrix
+KNN_bow <- CV(bow_data,10,"KNN", "bow_data")
+CKNN_bow <-KNN_bow$Confusion_matrix
+
+## Get the prediction result for LDA data
+RF_lda <- CV(lda_data,10,"RF")
+CRF_lda <- RF_lda$Confusion_matrix
+NB_lda <- CV(lda_data,10,"NB")
+CNB_lda <- NB_lda$Confusion_matrix
+SVM_lda <- CV(lda_data,10,"SVM", "lda_data")
+CSVM_lda <- SVM_lda$Confusion_matrix
+KNN_lda <- CV(lda_data,10,"KNN")
+CKNN_lda <- KNN_lda$Confusion_matrix
+
+## Get the prediction result for Bag of Words+LDA data
+RF_lda_bow <- CV(lda_bow_data,10,"RF")
+CRF_lda_bow <- RF_lda_bow$Confusion_matrix
+NB_lda_bow <- CV(lda_bow_data,10,"NB")
+CNB_lda_bow <- NB_lda_bow$Confusion_matrix
+SVM_lda_bow <- CV(lda_bow_data,10,"SVM", "lda_bow_data")
+CSVM_lda_bow <- SVM_lda_bow$Confusion_matrix
+KNN_lda_bow <- CV(lda_bow_data,10,"KNN")
+CKNN_lda_bow <- KNN_lda_bow$Confusion_matrix
+
+####  Perfomance of different algorithms
+####  Calculate the Macro Recall and preciese.
+####  To calculate the recall and preciese we need to build an another function.
+
+RPF<-function(result){
+  table<-Reduce('+', result)
+  #Recall
+  Recall<-c()
+  Accuracy<-c()
+  for(i in 1: nrow(table)) {
+    Recall[i] <- table[i,i]/(sum(table[i, ]))
+  }
+  #Precision
+  Precision<-c()
+  for(i in 1: nrow(table)) {
+    Precision[i] <- table[i,i]/(sum(table[, i]))
+  }
+  # F-Measure
+  Fmeasure <- (2*Precision*Recall)/(Precision + Recall)
+  # Accuracy
+  Accuracy[1] <- sum(diag(table))/sum(table)
+  # Macro Recall and Precision
+  Macro_Recall<-sum(Recall)/10
+  Macro_Precision<-sum(Precision)/10
+  Micro_Recall<-sum(diag(table))/sum(table)
+  Micro_Precision<-sum(diag(table))/sum(table)
+  tt<-cbind(Recall,Precision,Fmeasure)
+  rownames(tt)<-c(" topic.acq ","topic.corn","topic.crude","topic.earn","topic.grain",
+                  "topic.interest"," topic.money.fx","topic.ship","topic.trade","topic.wheat")
+  return(list(ClassMeasures=tt, Macro_Recall=Macro_Recall,
+              Macro_Precision=Macro_Precision, Micro_Recall=Micro_Recall, 
+              Micro_Precision=Micro_Precision, Accuracy=Accuracy))
+  
+}
+
+####  Performance of bag of words  ####
+TRF_bow<-RPF(CRF_bow)
+TNB_bow<-RPF(CNB_bow)
+TSVM_bow<-RPF(CSVM_bow)
+TKNN_bow<-RPF(CKNN_bow)
+
+## As a matrix
+BOW<-matrix(nrow=5,ncol=4)
+rownames(BOW) <- c("Macro_Recall", "Macro_Precision", "Micro_Recall",  "Micro_Precision","Average Accuracy")
+colnames(BOW) <- c("RF", "NB", "SVM", "KNN")
+for(i in 1:5){
+  BOW[i,1]<-round(TRF_bow[[i+1]],3)
+  BOW[i,2]<-round(TNB_bow[[i+1]],3)
+  BOW[i,3]<-round(TSVM_bow[[i+1]],3)
+  BOW[i,4]<-round(TKNN_bow[[i+1]],3)
+}
+BOW
+
+####  Performance of bag of LDA  ####
+TRF_lda<-RPF(CRF_lda)
+TNB_lda<-RPF(CNB_lda)
+TSVM_lda<-RPF(CSVM_lda)
+TKNN_lda<-RPF(CKNN_lda)
+
+## As a matrix
+LDAT<-matrix(nrow=5,ncol=4)
+rownames(LDAT) <- c("Macro_Recall", "Macro_Precision", "Micro_Recall",  "Micro_Precision","Average Accuracy")
+colnames(LDAT) <- c("RF", "NB", "SVM", "KNN")
+for(i in 1:5){
+  LDAT[i,1]<-round(TRF_lda[[i+1]],3)
+  LDAT[i,2]<-round(TNB_lda[[i+1]],3)
+  LDAT[i,3]<-round(TSVM_lda[[i+1]],3)
+  LDAT[i,4]<-round(TKNN_lda[[i+1]],3)
+}
+LDAT
+####  Performance of LDA+bag of words  ####
+TRF_lda_bow<-RPF(CRF_lda_bow)
+TNB_lda_bow<-RPF(CNB_lda_bow)
+TSVM_lda_bow<-RPF(CSVM_lda_bow)
+TKNN_lda_bow<-RPF(CKNN_lda_bow)
+
+## As a matrix
+LBDAT<-matrix(nrow=5,ncol=4)
+rownames(LBDAT) <- c("Macro_Recall", "Macro_Precision", "Micro_Recall",  "Micro_Precision","Average Accuracy")
+colnames(LBDAT) <- c("RF", "NB", "SVM", "KNN")
+for(i in 1:5){
+  LBDAT[i,1]<-round(TRF_lda_bow[[i+1]],3)
+  LBDAT[i,2]<-round(TNB_lda_bow[[i+1]],3)
+  LBDAT[i,3]<-round(TSVM_lda_bow[[i+1]],3)
+  LBDAT[i,4]<-round(TKNN_lda_bow[[i+1]],3)
+}
+LBDAT
+
+TRF_bow
+# The best method is Random forest, and the best feature is bag of words.
+
+#### Question 4
+
+##   From the previous analysis, the best performance features are bow_data
+#####   Then we do the K-Means clustering   #####
+bow_data_features <- bow_data
+bow_data_features$topic <- NULL
+
+### K means clustering 
+##  First we need to define the best number of clusters in k means.
+wss <- (nrow(bow_data_features)-1)*sum(apply(bow_data_features,2,var))
+for (i in 2:15) wss[i] <- sum(kmeans(bow_data_features, 
+                                     centers=i)$withinss)
+plot(1:15, wss, type="b", xlab="Number of Clusters",
+     ylab="Within groups sum of squares", main="Figure 2: Number of clusters against their SSE")
+##  From the plot we could find that cluster numbers equals to 10 fits the data well.
+
+## plot the principal component
+par(mfrow=c(1,1))
+pc <- prcomp(bow_data[,1:11])$x
+col <- as.numeric(bow_data$topic)
+plot(pc[,1],pc[,2],col=col,pch=col,xlab="PC1",ylab="PC2", main="Figure 3: Original principal graph
+     for bag of words")
+
+## Plot the clustering principal component.
+z <- scale(iris[,1:4])
+ans <- kmeans(bow_data_features, centers=10)
+clus <- ans$cluster
+plot(pc[,1],pc[,2],col=clus,pch=clus,xlab="PC1",ylab="PC2", main="Figure 4: Kmeans 
+cluster principal 
+     graph for bag of words")
+
+#### Hierarchical clustering
+h1 <- hclust(dist(bow_data[,1:11]), method="complete")
+clush <- cutree(h1, k=10)
+plot(h1,hang=-1, main="Figure 5: Hierarchical cluster dendrogram")
+rect.hclust(h1, k=10, border="red")
+plot(pc[,1],pc[,2],col=cluss,pch=cluss, main="Figure 6: Hierarchical 
+     clustering principal component")
+sh1 <- silhouette(clush, dist(bow_data[,1:11]))
+pdf('my_nice_plot.pdf')
+plot(sh1, main="Figure 7: Silhouette Hierarchical cluster")
+dev.off()
+
+##### Partitioning around medoids clustering #####
+pamc <- pam(dist(bow_data[,1:11]), 10)
+cat("silhouette-optimal number of clusters:", k.best, "\n")
+pdf('pam.pdf')
+plot(pamc, main="Figure 8: Sihouette plot of PAM")
+dev.off()
+plot(pc[,1],pc[,2],col=pamc$cluster,pch=pamc$cluster, main="Figure 9: PAM 
+     clustering principal component")
+
